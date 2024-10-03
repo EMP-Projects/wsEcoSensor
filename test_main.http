@@ -1,0 +1,5 @@
+# Test your FastAPI endpoints
+
+GET http://127.0.0.1:8000/air-quality/45/35
+Accept: application/json
+
