@@ -1,6 +1,5 @@
 import boto3
 
-
 def get_location(lat: float, lng: float):
     """
     Asynchronously retrieves the location information for the given latitude and longitude.
