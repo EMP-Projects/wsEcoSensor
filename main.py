@@ -3,16 +3,19 @@ import ecosensor
 app = FastAPI()
 
 @app.get("/air-quality/{lat}/{lng}")
-async def root(lat: float, lng: float):
-    location, layer = await ecosensor.get_layers(lat, lng)
+async def air_quality(lat: float, lng: float):
+    try :
+        location, layer = await ecosensor.get_layers(lat, lng)
 
-    if layer.get("error") is not None:
-        return layer
+        if layer.get("error") is not None:
+            return layer
 
-    properties = await ecosensor.get_geojson(layer.get('entityKey'), lat, lng)
+        properties = await ecosensor.get_data_by_coordinates(layer.get('entityKey'), lat, lng)
 
-    return {
-        "layer": layer,
-        "location": location,
-        "data": properties
-    }
+        return {
+            "layer": layer,
+            "location": location,
+            "data": properties
+        }
+    except Exception as e:
+        return dict(error=str(e))

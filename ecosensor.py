@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 import pyproj
-from shapely.geometry import Point, mapping, shape
+from shapely.geometry import shape
 from shapely.ops import nearest_points
 
 import httpx
@@ -9,7 +9,6 @@ import pytz
 from shapely.geometry.point import Point
 
 import aws
-import geopandas as gpd
 
 AWS_CF_URL = "https://d17kn6fj50jzfv.cloudfront.net"
 
@@ -102,20 +101,15 @@ async def get_list_geojson(entity_key: str):
     filtered_map_data = filter_map_by_key(map_data, entity_key)
     return filtered_map_data
 
-def filter_properties_by_date(properties: dict):
+def filter_properties_by_date(properties: dict, start_delta: timedelta = timedelta(minutes=0), end_delta: timedelta = timedelta(hours=1)):
     """
-    Filters the given properties to include only those that have a date greater than the current date.
-
-    Args:
-        properties (dict): A dictionary of properties to filter.
-
-    Returns:
+    Filters the given properties to include only those that have a date
         dict: A dictionary of filtered properties that have a date greater than the current date.
     """
     try:
         utc = pytz.UTC
-        start_date = datetime.now()
-        end_date = start_date + timedelta(hours=1)
+        start_date = datetime.now() + start_delta
+        end_date = start_date + end_delta
         start_date = utc.localize(start_date).replace(tzinfo=utc)
         end_date = utc.localize(end_date).replace(tzinfo=utc)
 
@@ -192,7 +186,33 @@ def get_nearest_feature(lat: float, lng: float, features: dict):
 
     return feature_nearest
 
-async def get_geojson(entity_key: str, lat: float, lng: float):
+def get_prediction_values(features: dict):
+    properties_filtered = []
+
+    for feature in features:
+        properties = feature.get('properties').get('Data')
+        if properties is not None:
+            # filter properties by field Data with date time greater now plus 1 hour until now plus 1 day
+            properties_data_filtered = filter_properties_by_date(properties, timedelta(hours=1), timedelta(days=1))
+            # filter properties by field Data with date time greater now
+            for p_item in properties_data_filtered:
+                # filter properties by field Pollution
+                if len(properties_filtered) == 0:
+                    properties_filtered.append(p_item)
+                else:
+                    # filter properties by field Pollution
+                    for p_filtered in properties_filtered:
+                        # filter properties by field Pollution
+                        if p_item.get('Pollution') == p_filtered.get('Pollution') and p_filtered.get('Value') < p_item.get('Value'):
+                            properties_filtered.remove(p_filtered)
+                            properties_filtered.append(p_item)
+
+    for p in properties_filtered:
+        p["location"] = aws.get_location(p.get("Lat"), p.get("Lng"))
+
+    return properties_filtered
+
+async def get_data_by_coordinates(entity_key: str, lat: float, lng: float):
     """
     Asynchronously retrieves the GeoJSON data containing the air quality layers.
 
@@ -204,8 +224,14 @@ async def get_geojson(entity_key: str, lat: float, lng: float):
     # create new list to store the filtered data
     properties_filtered = []
 
+    # create new variable to store the prediction values
+    prediction = None
+
     for data in map_data:
+        # get GeoJSON data from the URL
         geojson = await get_data(data.get('data'))
+        # get prediction values from the GeoJSON data
+        prediction = get_prediction_values(geojson.get('features'))
         # order features by distance from the given latitude and longitude
         feature_nearest = get_nearest_feature(lat, lng, geojson.get('features'))
         # get properties from the nearest feature
@@ -215,4 +241,7 @@ async def get_geojson(entity_key: str, lat: float, lng: float):
         for p_date in properties_filtered_by_date:
             properties_filtered.append(p_date)
 
-    return properties_filtered
+    return {
+        "now": properties_filtered,
+        "prediction": prediction
+    }
