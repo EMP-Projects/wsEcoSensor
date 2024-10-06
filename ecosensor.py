@@ -49,7 +49,7 @@ def filter_layers_by_city(layers: dict, city_name):
     Returns:
         list: A list of filtered layers that match the city name and typeMonitoringData criteria.
     """
-    return [layer for layer in layers if layer.get('cityName') == city_name and layer.get('typeMonitoringData') == 0]
+    return [layer for layer in layers if layer.get('cityName') == city_name and layer.get('typeMonitoringData') == 'AirQuality']
 
 def filter_map_by_key(map_data: dict, entity_key: str):
     """
@@ -128,7 +128,7 @@ def filter_properties_by_date(properties: dict, start_delta: timedelta = timedel
         }
 
 
-def create_geographic_point(lat, lng):
+def create_geographic_point(lat, lng, from_crs='EPSG:4326', to_crs='EPSG:3857'):
     """
     Creates a geographic point from the given latitude and longitude and converts it to the Web Mercator projection (EPSG:3857).
 
@@ -138,24 +138,28 @@ def create_geographic_point(lat, lng):
 
     Returns:
         shapely.geometry.Point: The geographic point in the Web Mercator projection.
+        :param lng:
+        :param lat:
+        :param to_crs:
+        :param from_crs:
     """
     # Create a geographic point from the given latitude and longitude
     point = Point(lng, lat)
 
     # Define the WGS 84 coordinate reference system (CRS)
-    wgs84 = pyproj.CRS('EPSG:4326')
+    from_crs_proj = pyproj.CRS(from_crs)
 
     # Define the Web Mercator projection (CRS)
-    web_mercator = pyproj.CRS('EPSG:3857')
+    to_crs_proj = pyproj.CRS(to_crs)
 
     # Create a transformer to convert the point from WGS 84 to Web Mercator
-    transformer = pyproj.Transformer.from_crs(wgs84, web_mercator, always_xy=True)
+    transformer = pyproj.Transformer.from_crs(from_crs_proj, to_crs_proj, always_xy=True)
 
     # Transform the point to the Web Mercator projection
-    point_3857 = transformer.transform(point.x, point.y)
+    point_result = transformer.transform(point.x, point.y)
 
     # Return the transformed point
-    return Point(point_3857)
+    return Point(point_result)
 
 def get_nearest_feature(lat: float, lng: float, features: dict):
     """
@@ -187,7 +191,7 @@ def get_nearest_feature(lat: float, lng: float, features: dict):
     return feature_nearest
 
 def get_prediction_values(features: dict):
-    properties_filtered = []
+    properties_max_value = None
 
     for feature in features:
         properties = feature.get('properties').get('Data')
@@ -197,20 +201,23 @@ def get_prediction_values(features: dict):
             # filter properties by field Data with date time greater now
             for p_item in properties_data_filtered:
                 # filter properties by field Pollution
-                if len(properties_filtered) == 0:
-                    properties_filtered.append(p_item)
+                if properties_max_value is None:
+                    properties_max_value = p_item
                 else:
                     # filter properties by field Pollution
-                    for p_filtered in properties_filtered:
-                        # filter properties by field Pollution
-                        if p_item.get('Pollution') == p_filtered.get('Pollution') and p_filtered.get('Value') < p_item.get('Value'):
-                            properties_filtered.remove(p_filtered)
-                            properties_filtered.append(p_item)
+                    if (p_item.get('Pollution') == properties_max_value.get('Pollution') and
+                            p_item.get('Value') > properties_max_value.get('Value')):
+                        properties_max_value = p_item
 
-    for p in properties_filtered:
-        p["location"] = aws.get_location(p.get("Lat"), p.get("Lng"))
+    # get location from AWS Location Service
+    if (properties_max_value.get("Lat") is not None and properties_max_value.get("Lng") is not None
+            and properties_max_value.get("Lat") > 0 and properties_max_value.get("Lng") > 0):
+            # create new point from latitude and longitude
+            new_point = create_geographic_point(properties_max_value.get("Lat"), properties_max_value.get("Lng"), 'EPSG:3857', 'EPSG:4326')
+            location = aws.get_location(new_point.y, new_point.x)
+            properties_max_value["location"] = location
 
-    return properties_filtered
+    return properties_max_value
 
 async def get_data_by_coordinates(entity_key: str, lat: float, lng: float):
     """
@@ -225,13 +232,13 @@ async def get_data_by_coordinates(entity_key: str, lat: float, lng: float):
     properties_filtered = []
 
     # create new variable to store the prediction values
-    prediction = None
+    prediction = []
 
     for data in map_data:
         # get GeoJSON data from the URL
         geojson = await get_data(data.get('data'))
         # get prediction values from the GeoJSON data
-        prediction = get_prediction_values(geojson.get('features'))
+        prediction.append(get_prediction_values(geojson.get('features')))
         # order features by distance from the given latitude and longitude
         feature_nearest = get_nearest_feature(lat, lng, geojson.get('features'))
         # get properties from the nearest feature
