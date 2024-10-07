@@ -65,7 +65,7 @@ def filter_map_by_key(map_data: dict, entity_key: str):
     """
     return [m for m in map_data if m.get('entityKey') == entity_key]
 
-async def get_layers(lat: float, lng: float):
+async def get_layers(lat: float, lng: float, city: str = None):
     """
     Asynchronously retrieves the air quality layers for a given latitude and longitude.
 
@@ -79,17 +79,24 @@ async def get_layers(lat: float, lng: float):
     Raises:
         botocore.exceptions.BotoCoreError: If there is an error with the AWS SDK.
         botocore.exceptions.ClientError: If there is an error with the AWS service.
+        :param lat:
+        :param lng:
+        :param city:
     """
-    # get geocoding from open-meteo from coordinates
-    location = aws.get_location(lat, lng)
-    # get city name from location
-    city = location['Municipality']
+    if city is not None:
+        # get geocoding from open-meteo from coordinates
+        location = aws.get_location(lat, lng)
+        # get city name from location
+        city_founded = location['Municipality']
+    else:
+        city_founded = city
+
     # get layers from AWS CloudFront
     layers = await get_data("layers.json")
     # filter layers by city name
-    filtered_layers = filter_layers_by_city(layers, city)
+    filtered_layers = filter_layers_by_city(layers, city_founded)
     # return the first filtered layer or an error message if no data is available
-    return filtered_layers[0] if filtered_layers else { "error": "No data available for this coordinates [" + str(lat) + ", " + str(lng) + "]" }
+    return filtered_layers[0] if filtered_layers else { "error": "No data available for this coordinates [" + str(lat) + ", " + str(lng) + "]" + " and city [" + city_founded + "]" }
 
 async def get_layers_by_city(city: str):
     """
@@ -135,8 +142,6 @@ def filter_properties_by_date(properties: dict, start_delta: timedelta = timedel
         for p in properties:
             p_date = utc.localize(datetime.strptime(p.get('Date'), "%Y-%m-%dT%H:%M:%SZ")).replace(tzinfo=utc)
             if start_date <= p_date <= end_date:
-                if with_location:
-                    p["location"] = get_location(p.get("Lat"), p.get("Lng"))
                 properties_filtered.append(p)
 
         return properties_filtered
@@ -313,16 +318,35 @@ async def get_data_by_city(city_name: str):
 
     return await get_data_by(layer.get('entityKey'))
 
-async def get_data_by_coordinates(lat: float, lng: float):
+async def get_data_by_coordinates(lat: float, lng: float, city: str = None):
     """
     Asynchronously retrieves the GeoJSON data containing the air quality layers.
 
     Returns:
         dict: The GeoJSON data containing the air quality layers.
     """
-    layer = await get_layers(lat, lng)
+    layer = await get_layers(lat, lng, city)
 
     if layer.get("error") is not None:
         return layer
 
     return await get_data_by(layer.get('entityKey'), lat, lng)
+
+async def get_data_by_query(query: str):
+    """
+    Asynchronously retrieves the location information for the given query and retrieves the air quality data for the location.
+
+    Args:
+        query (str): The query to search for.
+
+    Returns:
+        dict: The air quality data for the location specified by the query.
+    """
+    location = aws.get_location_by_text(query)
+    if location is not None:
+        lat = location['Geometry']['Point'][1]
+        lng = location['Geometry']['Point'][0]
+        city = location['Municipality']
+        return await get_data_by_coordinates(lat, lng, city)
+
+    return {"error": "No location found for the query [" + query + "]"}
