@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from typing import List, Any
 
 import pyproj
 from shapely.geometry import shape
@@ -88,7 +89,24 @@ async def get_layers(lat: float, lng: float):
     # filter layers by city name
     filtered_layers = filter_layers_by_city(layers, city)
     # return the first filtered layer or an error message if no data is available
-    return location, filtered_layers[0] if filtered_layers else { "error": "No data available for this coordinates [" + str(lat) + ", " + str(lng) + "]" }
+    return filtered_layers[0] if filtered_layers else { "error": "No data available for this coordinates [" + str(lat) + ", " + str(lng) + "]" }
+
+async def get_layers_by_city(city: str):
+    """
+    Asynchronously retrieves the air quality layers for a given city.
+
+    Args:
+        city (str): The name of the city to retrieve the layers for.
+
+    Returns:
+        dict: The first layer that matches the city name, or None if no layers match.
+    """
+    layers = await get_data("layers.json")
+    layer = [l for l in layers if l.get('cityName') == city]
+    if len(layers) > 0:
+        return layer[0]
+
+    return {"error": "No data available for this city [" + city + "]"}
 
 async def get_list_geojson(entity_key: str):
     """
@@ -98,10 +116,9 @@ async def get_list_geojson(entity_key: str):
         list: The list of GeoJSON data containing the air quality layers.
     """
     map_data = await get_data("map.json")
-    filtered_map_data = filter_map_by_key(map_data, entity_key)
-    return filtered_map_data
+    return filter_map_by_key(map_data, entity_key)
 
-def filter_properties_by_date(properties: dict, start_delta: timedelta = timedelta(minutes=0), end_delta: timedelta = timedelta(hours=1)):
+def filter_properties_by_date(properties: dict, start_delta: timedelta = timedelta(minutes=0), end_delta: timedelta = timedelta(hours=1), with_location: bool = True):
     """
     Filters the given properties to include only those that have a date
         dict: A dictionary of filtered properties that have a date greater than the current date.
@@ -118,6 +135,8 @@ def filter_properties_by_date(properties: dict, start_delta: timedelta = timedel
         for p in properties:
             p_date = utc.localize(datetime.strptime(p.get('Date'), "%Y-%m-%dT%H:%M:%SZ")).replace(tzinfo=utc)
             if start_date <= p_date <= end_date:
+                if with_location:
+                    p["location"] = get_location(p.get("Lat"), p.get("Lng"))
                 properties_filtered.append(p)
 
         return properties_filtered
@@ -161,7 +180,7 @@ def create_geographic_point(lat, lng, from_crs='EPSG:4326', to_crs='EPSG:3857'):
     # Return the transformed point
     return Point(point_result)
 
-def get_nearest_feature(lat: float, lng: float, features: dict):
+def get_nearest_feature(lat: float, lng: float, features: dict, convert_crs: bool = True):
     """
     Orders the given features by the distance from the specified latitude and longitude.
 
@@ -172,10 +191,18 @@ def get_nearest_feature(lat: float, lng: float, features: dict):
 
     Returns:
         dict: A dictionary of ordered features by the distance from the specified latitude and longitude.
+        :param features:
+        :param lng:
+        :param lat:
+        :param convert_crs:
     """
     feature_nearest = None
     min_distance = None
-    ref_point = create_geographic_point(lng, lat)
+    # create a reference point from the given latitude and longitude
+    if convert_crs is True:
+        ref_point = create_geographic_point(lng, lat)
+    else:
+        ref_point = Point(lng, lat)
 
     # iterate over the features and calculate the distance from the reference point
     for feature in features:
@@ -190,14 +217,33 @@ def get_nearest_feature(lat: float, lng: float, features: dict):
 
     return feature_nearest
 
-def get_prediction_values(features: dict):
+def get_location(lat: float, lng: float):
+    """
+    Retrieves the location from AWS Location Service based on the given latitude and longitude.
+
+    Args:
+        lat (float): The latitude of the location.
+        lng (float): The longitude of the location.
+
+    Returns:
+        dict: The location data from AWS Location Service, or None if the latitude and longitude are invalid.
+    """
+    # get location from AWS Location Service
+    if lat is not None and lng is not None and lat > 0 and lng > 0:
+        # create new point from latitude and longitude
+        new_point = create_geographic_point(lat, lng, 'EPSG:3857', 'EPSG:4326')
+        location = aws.get_location(new_point.y, new_point.x)
+        return location
+    return None
+
+def get_prediction_values(features: dict, start_delta: timedelta = timedelta(hours=1), end_delta: timedelta = timedelta(days=1), with_location: bool = True):
     properties_max_value = None
 
     for feature in features:
         properties = feature.get('properties').get('Data')
         if properties is not None:
             # filter properties by field Data with date time greater now plus 1 hour until now plus 1 day
-            properties_data_filtered = filter_properties_by_date(properties, timedelta(hours=1), timedelta(days=1))
+            properties_data_filtered = filter_properties_by_date(properties, start_delta, end_delta)
             # filter properties by field Data with date time greater now
             for p_item in properties_data_filtered:
                 # filter properties by field Pollution
@@ -210,45 +256,73 @@ def get_prediction_values(features: dict):
                         properties_max_value = p_item
 
     # get location from AWS Location Service
-    if (properties_max_value.get("Lat") is not None and properties_max_value.get("Lng") is not None
-            and properties_max_value.get("Lat") > 0 and properties_max_value.get("Lng") > 0):
-            # create new point from latitude and longitude
-            new_point = create_geographic_point(properties_max_value.get("Lat"), properties_max_value.get("Lng"), 'EPSG:3857', 'EPSG:4326')
-            location = aws.get_location(new_point.y, new_point.x)
-            properties_max_value["location"] = location
+    if with_location:
+        properties_max_value["location"] = get_location(properties_max_value.get("Lat"), properties_max_value.get("Lng"))
 
     return properties_max_value
 
-async def get_data_by_coordinates(entity_key: str, lat: float, lng: float):
-    """
-    Asynchronously retrieves the GeoJSON data containing the air quality layers.
+async def get_data_by(entity_key: str, lat: float = None, lng: float = None):
 
-    Returns:
-        dict: The GeoJSON data containing the air quality layers.
-    """
     map_data = await get_list_geojson(entity_key)
 
     # create new list to store the filtered data
-    properties_filtered = []
+    now = []
 
     # create new variable to store the prediction values
     prediction = []
 
     for data in map_data:
         # get GeoJSON data from the URL
-        geojson = await get_data(data.get('data'))
+        geojson: Any = await get_data(data.get('data'))
+        features: dict | None = geojson.get('features')
         # get prediction values from the GeoJSON data
-        prediction.append(get_prediction_values(geojson.get('features')))
-        # order features by distance from the given latitude and longitude
-        feature_nearest = get_nearest_feature(lat, lng, geojson.get('features'))
+        prediction.append(get_prediction_values(features))
+        if lat is not None and lng is not None:
+            # order features by distance from the given latitude and longitude
+            feature_nearest = get_nearest_feature(lat, lng, features)
+        else:
+            # get center from the GeoJSON data
+            center = data.get('center')
+            feature_nearest = get_nearest_feature(float(center[0]), float(center[1]), features, False)
         # get properties from the nearest feature
         properties = feature_nearest.get('properties').get('Data')
         # filter properties by field Data with date time greater now
         properties_filtered_by_date = filter_properties_by_date(properties)
         for p_date in properties_filtered_by_date:
-            properties_filtered.append(p_date)
+            now.append(p_date)
 
     return {
-        "now": properties_filtered,
+        "now": now,
         "prediction": prediction
     }
+
+async def get_data_by_city(city_name: str):
+    """
+    Asynchronously retrieves the GeoJSON data containing the air quality layers for a given city.
+
+    Args:
+        city_name (str): The name of the city to retrieve the data for.
+
+    Returns:
+        dict: The GeoJSON data containing the air quality layers, or an error message if no data is available for the specified city.
+    """
+    # get layers from AWS CloudFront
+    layer = await get_layers_by_city(city_name)
+    if layer.get("error") is not None:
+        return layer
+
+    return await get_data_by(layer.get('entityKey'))
+
+async def get_data_by_coordinates(lat: float, lng: float):
+    """
+    Asynchronously retrieves the GeoJSON data containing the air quality layers.
+
+    Returns:
+        dict: The GeoJSON data containing the air quality layers.
+    """
+    layer = await get_layers(lat, lng)
+
+    if layer.get("error") is not None:
+        return layer
+
+    return await get_data_by(layer.get('entityKey'), lat, lng)
